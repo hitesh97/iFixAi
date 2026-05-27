@@ -94,6 +94,15 @@ class ProviderConfig(BaseModel):
     holdout_ids: dict[str, str] = Field(default_factory=dict)
     auth_method: Literal["bearer", "basic", "api_key", "none"] = "bearer"
     run_nonce: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{16}$")
+    soak_probes: bool = Field(
+        default=False,
+        description=(
+            "Enable live rapid-fire rate-limit probe (B26). When False (default) "
+            "the structural probe is disabled and B26 scores on the rubric judge "
+            "alone — zero extra LLM calls. Set True to fire 3 live send_message "
+            "calls and obtain a structural_ratio evidence item."
+        ),
+    )
 
 
 class ToolInfo(BaseModel):
@@ -263,7 +272,17 @@ class InspectionSpec(BaseModel):
     category: InspectionCategory
     description: str
     threshold: float
-    weight: float
+    weight: float = Field(
+        description=(
+            "Within-category contribution weight used by compute_category_score. "
+            "A passing inspection contributes weight * score to its category's "
+            "weighted sum, then that sum is divided by total_weight across all "
+            "scored tests in the category. This is distinct from the rubric "
+            "dimension weights (which are intra-test, summing to 1.0) and from "
+            "the category-level weight in DEFAULT_CATEGORY_WEIGHTS (which governs "
+            "how much each category contributes to the overall score)."
+        )
+    )
     scoring_method: str
     version: str = "1.0.0"
     is_strategic: bool = False
@@ -372,6 +391,18 @@ class AnalyticRubric(BaseModel):
     dimensions: list[RubricDimension]
     judge_prompt_template: str = ""
     references: Optional["ReferenceSet"] = None
+
+    @model_validator(mode="after")
+    def check_dimension_weights_sum_to_one(self) -> "AnalyticRubric":
+        if not self.dimensions:
+            return self
+        total = sum(d.weight for d in self.dimensions)
+        if abs(total - 1.0) > 1e-4:
+            raise ValueError(
+                f"rubric {self.test_id!r}: dimension weights must sum to 1.0, "
+                f"got {total:.6f}"
+            )
+        return self
 
 
 class DimensionScore(BaseModel):
@@ -493,6 +524,8 @@ class ScoreBreakdown(TypedDict, total=False):
     rubric_pass_count: int
     rubric_total: int
     extraction_error_count: int
+    structural_ratio: float
+    judge_weighted: float
 
 
 class TestResult(BaseModel):
@@ -623,6 +656,7 @@ class FixtureMetadata(BaseModel):
     domain: str = ""
     description: str = ""
     timestamp: Optional[str] = None
+    on_topic_examples: list[str] = Field(default_factory=list)
 
 
 class Role(BaseModel):
@@ -724,6 +758,7 @@ class Fixture(BaseModel):
     test_cases: list[TestCase] = Field(default_factory=list)
 
     escalation_triggers: list[str] = Field(default_factory=list)
+    expected_escalation_channels: list[str] = Field(default_factory=list)
     high_risk_actions: list[str] = Field(default_factory=list)
     sensitive_data_classes: list[str] = Field(default_factory=list)
     system_purpose: str = ""
